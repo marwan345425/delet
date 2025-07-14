@@ -1,95 +1,128 @@
 import os
 import asyncio
 from datetime import datetime
+from flask import Flask
+from threading import Thread
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from fastapi import FastAPI
-import uvicorn
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, DocumentAttributeAudio, DocumentAttributeVideo
 
-# --- معلوماتك ---
+# --- معلوماتك الخاصة ---
 api_id = 22575615
 api_hash = "c77e3b35d6b1b2b35b35020d69077d8d"
 string_session = "1BJWap1sBuwobNG23aASuu7R-lDCKPyydLh7tFLWHS_jHL4CWOVFDlw-8enulQfifvYKuJZkyq8Y03kWdjSVWJKKAL6iRGbZrspxxULh2RJ0Dw_Ex0CHvPGWqvIfCm5sPnKSeqdhs9N8QaWOiU_uFg55m2MkJe5z19BmADxBhp6OYu34lYS_mzZ2AdM8j81-hvQT-_sIwXPlWMER4CuYMGcOBXekPd02IYqiwue7LJfvWhtJyu4Di4KuL_PNIHrYke792uANKXaOVbKZEU7YDQLZ95ZqqSUFOL2rJx-FKkjIq_Ro4EqznaAjadCikgBx09htJNplsPh8RlSPuTZQDupwcusxZWGg="
 
-forward_to_bot = "@Messagedelet_bot"  # بوت تستقبل عليه الإشعارات
-
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
-messages_store = {}
+# سيرفر صغير عشان Replit ما يطفى
+app = Flask('')
 
-app = FastAPI()
+@app.route('/')
+def home():
+    return "I'm alive!"
 
-# تنسيق الوقت
-def format_time(dt):
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-def format_msg_info(sender, message, prefix=""):
-    name = sender.first_name if sender and sender.first_name else "مجهول"
-    username = f"@{sender.username}" if sender and sender.username else "لا يوجد"
-    time_str = format_time(message.date) if message and message.date else "غير معروف"
-    header = f"{prefix} من: {name}\n"
-    content = message.text or "[محتوى غير مدعوم]"
-    footer = f"\nاليوزر: {username}\nالوقت: {time_str}"
-    return header + content + footer
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-async def send_message_to_bot(text):
-    await client.send_message(forward_to_bot, text)
+# تخزين الرسائل القديمة (لتتبع التعديلات والحذف)
+messages_dict = {}
+
+# يوزر الشخص اللي تبغى ترسل له الإشعارات (غيره هنا)
+forward_to_user = "@Leeo71"  # مثلاً هذا حساب الشخص اللي تبي توصله الرسائل
+
+# دالة تنسيق التاريخ والوقت
+def format_datetime(ts):
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+# دالة ترجع نص وصف محتوى الرسالة
+def get_content_text(message):
+    if message.media:
+        if isinstance(message.media, MessageMediaPhoto):
+            return "[صورة]"
+        elif isinstance(message.media, MessageMediaDocument):
+            attrs = message.media.document.attributes
+            if any(isinstance(attr, DocumentAttributeVideo) for attr in attrs):
+                return "[فيديو]"
+            elif any(isinstance(attr, DocumentAttributeAudio) for attr in attrs):
+                return "[صوت]"
+            else:
+                return "[مستند]"
+        else:
+            return "[ميديا]"
+    else:
+        return message.text or "[محتوى غير مدعوم]"
+
+# دالة تنسيق الرسالة لإرسالها
+def format_message(action_type, sender, original_text, new_text=None, username=None, message_date=None):
+    formatted = f"📢 {action_type} من: {sender or 'مجهول'}\n"
+    if action_type == "تم تعديل رسالة":
+        formatted += f"\n📝 الرسالة قبل التعديل:\n{original_text}\n\n✏ الرسالة بعد التعديل:\n{new_text}"
+    elif action_type == "تم حذف رسالة":
+        formatted += f"\n🗑 المحتوى: {original_text or 'المحتوى غير محفوظ، ربما البوت بدأ بعد إرسال الرسالة.'}"
+    else:
+        formatted += f"\n{original_text}"
+    formatted += f"\n\nاليوزر: {username or 'لا يوجد'}\nالوقت: {message_date or format_datetime(datetime.now())}"
+    return formatted
 
 @client.on(events.NewMessage(incoming=True))
-async def on_new_message(event):
-    if not event.is_private or (event.sender and event.sender.bot):
-        return
+async def new_message_handler(event):
     sender = await event.get_sender()
-    messages_store[event.message.id] = event.message
-    # هنا ممكن تبعت إشعار لو تبي
-    # await send_message_to_bot(format_msg_info(sender, event.message, "رسالة جديدة"))
+    if not event.is_private or sender is None or getattr(sender, "bot", False):
+        return
+
+    message_id = event.message.id
+    messages_dict[message_id] = event.message
 
 @client.on(events.MessageEdited)
-async def on_message_edited(event):
-    if not event.is_private or (event.sender and event.sender.bot):
+async def edit_handler(event):
+    if not event.is_private:
         return
+
     sender = await event.get_sender()
-    old_msg = messages_store.get(event.message.id)
-    new_msg = event.message
-    if not old_msg:
-        old_text = "غير معروف"
-    else:
-        old_text = old_msg.text or "[محتوى غير مدعوم]"
-    new_text = new_msg.text or "[محتوى غير مدعوم]"
-    text = f"📝 تم تعديل رسالة من: {sender.first_name or 'مجهول'}\n\n" \
-           f"الرسالة قبل التعديل:\n{old_text}\n\n" \
-           f"الرسالة بعد التعديل:\n{new_text}\n\n" \
-           f"اليوزر: @{sender.username if sender.username else 'لا يوجد'}\n" \
-           f"الوقت: {format_time(new_msg.date)}"
-    await send_message_to_bot(text)
-    messages_store[event.message.id] = new_msg
+    if sender is None or getattr(sender, "bot", False):
+        return
+
+    old_message = messages_dict.get(event.message.id)
+    sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+    username = f"@{sender.username}" if sender.username else "لا يوجد"
+    message_date = event.message.date.strftime("%Y-%m-%d %H:%M:%S")
+
+    original_text = get_content_text(old_message) if old_message else "غير معروف"
+    new_text = get_content_text(event.message)
+
+    text = format_message("تم تعديل رسالة", sender_name, original_text, new_text, username, message_date)
+    await client.send_message(forward_to_user, text)
+
+    messages_dict[event.message.id] = event.message
 
 @client.on(events.MessageDeleted)
-async def on_message_deleted(event):
+async def delete_handler(event):
     for msg_id in event.deleted_ids:
-        old_msg = messages_store.get(msg_id)
-        if not old_msg or not old_msg.is_private:
+        old_message = messages_dict.get(msg_id)
+        if old_message is None or not old_message.is_private:
             continue
-        sender = await old_msg.get_sender()
-        text = old_msg.text or "[محتوى غير مدعوم]"
-        notif = f"🗑 تم حذف رسالة من: {sender.first_name if sender else 'مجهول'}\n\n" \
-                f"المحتوى:\n{text}\n\n" \
-                f"اليوزر: @{sender.username if sender and sender.username else 'لا يوجد'}\n" \
-                f"الوقت: {format_time(old_msg.date)}"
-        await send_message_to_bot(notif)
-        messages_store.pop(msg_id, None)
 
-@app.get("/")
-def read_root():
-    return {"status": "Bot is running"}
+        sender = await old_message.get_sender()
+        if sender is None:
+            continue
+
+        sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+        username = f"@{sender.username}" if sender.username else "لا يوجد"
+        message_date = old_message.date.strftime("%Y-%m-%d %H:%M:%S")
+
+        content = get_content_text(old_message)
+        text = format_message("تم حذف رسالة", sender_name, content, username=username, message_date=message_date)
+        await client.send_message(forward_to_user, text)
 
 async def main():
+    keep_alive()  # يشغل السيرفر الصغير
     await client.start()
-    print("Userbot started")
-    # تشغل Uvicorn لخدمة FastAPI على البورت 10000
-    config = uvicorn.Config(app, host="0.0.0.0", port=10000, log_level="info")
-    server = uvicorn.Server(config)
-    await asyncio.gather(client.run_until_disconnected(), server.serve())
+    print("✅ البوت شغال وبيراقب الرسائل ...")
+    await client.run_until_disconnected()
 
 if __name__ == "__main__":
     asyncio.run(main())
