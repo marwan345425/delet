@@ -1,0 +1,95 @@
+import os
+import asyncio
+from datetime import datetime
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from fastapi import FastAPI
+import uvicorn
+
+# --- معلوماتك ---
+api_id = 22575615
+api_hash = "c77e3b35d6b1b2b35b35020d69077d8d"
+string_session = "1BJWap1sBuwobNG23aASuu7R-lDCKPyydLh7tFLWHS_jHL4CWOVFDlw-8enulQfifvYKuJZkyq8Y03kWdjSVWJKKAL6iRGbZrspxxULh2RJ0Dw_Ex0CHvPGWqvIfCm5sPnKSeqdhs9N8QaWOiU_uFg55m2MkJe5z19BmADxBhp6OYu34lYS_mzZ2AdM8j81-hvQT-_sIwXPlWMER4CuYMGcOBXekPd02IYqiwue7LJfvWhtJyu4Di4KuL_PNIHrYke792uANKXaOVbKZEU7YDQLZ95ZqqSUFOL2rJx-FKkjIq_Ro4EqznaAjadCikgBx09htJNplsPh8RlSPuTZQDupwcusxZWGg="
+
+forward_to_bot = "@Messagedelet_bot"  # بوت تستقبل عليه الإشعارات
+
+client = TelegramClient(StringSession(string_session), api_id, api_hash)
+
+messages_store = {}
+
+app = FastAPI()
+
+# تنسيق الوقت
+def format_time(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+def format_msg_info(sender, message, prefix=""):
+    name = sender.first_name if sender and sender.first_name else "مجهول"
+    username = f"@{sender.username}" if sender and sender.username else "لا يوجد"
+    time_str = format_time(message.date) if message and message.date else "غير معروف"
+    header = f"{prefix} من: {name}\n"
+    content = message.text or "[محتوى غير مدعوم]"
+    footer = f"\nاليوزر: {username}\nالوقت: {time_str}"
+    return header + content + footer
+
+async def send_message_to_bot(text):
+    await client.send_message(forward_to_bot, text)
+
+@client.on(events.NewMessage(incoming=True))
+async def on_new_message(event):
+    if not event.is_private or (event.sender and event.sender.bot):
+        return
+    sender = await event.get_sender()
+    messages_store[event.message.id] = event.message
+    # هنا ممكن تبعت إشعار لو تبي
+    # await send_message_to_bot(format_msg_info(sender, event.message, "رسالة جديدة"))
+
+@client.on(events.MessageEdited)
+async def on_message_edited(event):
+    if not event.is_private or (event.sender and event.sender.bot):
+        return
+    sender = await event.get_sender()
+    old_msg = messages_store.get(event.message.id)
+    new_msg = event.message
+    if not old_msg:
+        old_text = "غير معروف"
+    else:
+        old_text = old_msg.text or "[محتوى غير مدعوم]"
+    new_text = new_msg.text or "[محتوى غير مدعوم]"
+    text = f"📝 تم تعديل رسالة من: {sender.first_name or 'مجهول'}\n\n" \
+           f"الرسالة قبل التعديل:\n{old_text}\n\n" \
+           f"الرسالة بعد التعديل:\n{new_text}\n\n" \
+           f"اليوزر: @{sender.username if sender.username else 'لا يوجد'}\n" \
+           f"الوقت: {format_time(new_msg.date)}"
+    await send_message_to_bot(text)
+    messages_store[event.message.id] = new_msg
+
+@client.on(events.MessageDeleted)
+async def on_message_deleted(event):
+    for msg_id in event.deleted_ids:
+        old_msg = messages_store.get(msg_id)
+        if not old_msg or not old_msg.is_private:
+            continue
+        sender = await old_msg.get_sender()
+        text = old_msg.text or "[محتوى غير مدعوم]"
+        notif = f"🗑 تم حذف رسالة من: {sender.first_name if sender else 'مجهول'}\n\n" \
+                f"المحتوى:\n{text}\n\n" \
+                f"اليوزر: @{sender.username if sender and sender.username else 'لا يوجد'}\n" \
+                f"الوقت: {format_time(old_msg.date)}"
+        await send_message_to_bot(notif)
+        messages_store.pop(msg_id, None)
+
+@app.get("/")
+def read_root():
+    return {"status": "Bot is running"}
+
+async def main():
+    await client.start()
+    print("Userbot started")
+    # تشغل Uvicorn لخدمة FastAPI على البورت 10000
+    config = uvicorn.Config(app, host="0.0.0.0", port=10000, log_level="info")
+    server = uvicorn.Server(config)
+    await asyncio.gather(client.run_until_disconnected(), server.serve())
+
+if __name__ == "__main__":
+    asyncio.run(main())
